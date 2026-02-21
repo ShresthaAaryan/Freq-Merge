@@ -26,11 +26,6 @@ Run
 import os
 import sys
 import argparse
-import pathlib
-# Ensure the repository root is on sys.path so local imports (e.g. `data.cifar100`) work
-REPO_ROOT = str(pathlib.Path(__file__).resolve().parent)
-if REPO_ROOT not in sys.path:
-    sys.path.insert(0, REPO_ROOT)
 import random
 import json
 import time
@@ -44,17 +39,7 @@ from torch.amp import GradScaler, autocast
 from tqdm import tqdm
 
 import config as cfg
-try:
-    from data.cifar100 import get_cifar100_loaders
-except Exception:
-    # Fallback: load module directly from file path in case a different 'data'
-    # package is shadowing the local `data` package or import path issues exist.
-    import importlib.util
-    cifar_path = os.path.join(REPO_ROOT, "data", "cifar100.py")
-    spec = importlib.util.spec_from_file_location("local_data_cifar100", cifar_path)
-    local_mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(local_mod)
-    get_cifar100_loaders = local_mod.get_cifar100_loaders
+from data.cifar100 import get_cifar100_loaders
 from models.vit_freqmerge import build_freqmerge_vit
 from utils.metrics import AverageMeter, accuracy
 from utils.visualize import plot_training_curves
@@ -93,8 +78,6 @@ def parse_args():
                    help="Train plain ViT-Small baseline without FreqMerge.")
     p.add_argument("--pretrained",    action="store_true", default=True)
     p.add_argument("--seed",          type=int,   default=42)
-    p.add_argument("--val_data_dir",  type=str,   default=None,
-                   help="Optional ImageFolder-style directory to use for validation.")
     p.add_argument("--ckpt_dir",      type=str,   default=None)
     p.add_argument("--log_dir",       type=str,   default=None)
     p.add_argument("--viz_dir",       type=str,   default=None)
@@ -253,17 +236,6 @@ def main():
 
     # ── Data ────────────────────────────────────────────────────────────
     train_loader, val_loader = get_cifar100_loaders(batch_size=args.batch_size)
-    # If user provided a custom validation dataset (ImageFolder layout), use it
-    if args.val_data_dir is not None:
-        try:
-            from data.val_loader import get_val_loader_from_dir
-            val_loader = get_val_loader_from_dir(
-                args.val_data_dir,
-                batch_size=args.batch_size,
-            )
-        except Exception as e:
-            print(f"Failed to load custom val dataset from {args.val_data_dir}: {e}")
-            print("Falling back to CIFAR-100 validation set.")
 
     # ── Model ───────────────────────────────────────────────────────────
     merge_layers = [] if args.no_freqmerge else args.merge_layers
