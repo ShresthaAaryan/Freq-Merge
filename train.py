@@ -26,6 +26,11 @@ Run
 import os
 import sys
 import argparse
+import pathlib
+# Ensure the repository root is on sys.path so local imports (e.g. `data.cifar100`) work
+REPO_ROOT = str(pathlib.Path(__file__).resolve().parent)
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 import random
 import json
 import time
