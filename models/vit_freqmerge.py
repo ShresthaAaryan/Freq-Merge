@@ -51,38 +51,34 @@ class FreqMergeEncoderBlock(nn.Module):
         self.merge_block = merge_block
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Attempt to insert the FreqMerge block between the block's
-        # attention and MLP (attn -> merge -> mlp), which matches the
-        # paper's described placement. Some timm block variants expose
-        # `norm1`, `attn`, `drop_path`, `norm2`, `mlp` attributes; we
-        # try that path and otherwise fall back to calling the
-        # original block() and applying merge afterwards.
+        # Strict paper-compliant insertion: apply attention -> merge -> MLP
+        # This requires the timm ViT block to expose `norm1`, `attn`, `norm2`,
+        # and `mlp`. If those internals are not present, raise an error so the
+        # user can install a compatible timm version (paper-strict behaviour).
         block = self.vit_block
-        # Preferred: split block forward into attn -> merge -> mlp
-        if all(hasattr(block, a) for a in ("norm1", "attn", "norm2", "mlp")):
-            try:
-                # Pre-norm attention
-                x_attn = block.attn(block.norm1(x))
-                if hasattr(block, "drop_path") and block.drop_path is not None:
-                    x_attn = block.drop_path(x_attn)
-                x = x + x_attn
+        required = ("norm1", "attn", "norm2", "mlp")
+        if not all(hasattr(block, a) for a in required):
+            missing = [a for a in required if not hasattr(block, a)]
+            raise RuntimeError(
+                f"Timm ViT block is missing required internals for paper-strict "
+                f"FreqMerge insertion: {missing}. Install a compatible timm "
+                f"version or modify the code to allow fallback behavior."
+            )
 
-                # Frequency-guided token reduction (exclude CLS internally)
-                x = self.merge_block(x)
+        # Pre-norm attention
+        x_attn = block.attn(block.norm1(x))
+        if hasattr(block, "drop_path") and block.drop_path is not None:
+            x_attn = block.drop_path(x_attn)
+        x = x + x_attn
 
-                # MLP (feed-forward) on reduced token set
-                x_mlp = block.mlp(block.norm2(x))
-                if hasattr(block, "drop_path") and block.drop_path is not None:
-                    x_mlp = block.drop_path(x_mlp)
-                x = x + x_mlp
-                return x
-            except Exception:
-                # If any internals behave unexpectedly, fall back below
-                pass
-
-        # Fallback: apply the original block then merge (previous behaviour)
-        x = block(x)
+        # Frequency-guided token reduction (exclude CLS internally)
         x = self.merge_block(x)
+
+        # MLP (feed-forward) on reduced token set
+        x_mlp = block.mlp(block.norm2(x))
+        if hasattr(block, "drop_path") and block.drop_path is not None:
+            x_mlp = block.drop_path(x_mlp)
+        x = x + x_mlp
         return x
 
 
