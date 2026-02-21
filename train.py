@@ -44,7 +44,17 @@ from torch.amp import GradScaler, autocast
 from tqdm import tqdm
 
 import config as cfg
-from data.cifar100 import get_cifar100_loaders
+try:
+    from data.cifar100 import get_cifar100_loaders
+except Exception:
+    # Fallback: load module directly from file path in case a different 'data'
+    # package is shadowing the local `data` package or import path issues exist.
+    import importlib.util
+    cifar_path = os.path.join(REPO_ROOT, "data", "cifar100.py")
+    spec = importlib.util.spec_from_file_location("local_data_cifar100", cifar_path)
+    local_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(local_mod)
+    get_cifar100_loaders = local_mod.get_cifar100_loaders
 from models.vit_freqmerge import build_freqmerge_vit
 from utils.metrics import AverageMeter, accuracy
 from utils.visualize import plot_training_curves
