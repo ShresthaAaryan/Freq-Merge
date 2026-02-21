@@ -78,6 +78,8 @@ def parse_args():
                    help="Train plain ViT-Small baseline without FreqMerge.")
     p.add_argument("--pretrained",    action="store_true", default=True)
     p.add_argument("--seed",          type=int,   default=42)
+    p.add_argument("--val_data_dir",  type=str,   default=None,
+                   help="Optional ImageFolder-style directory to use for validation.")
     p.add_argument("--ckpt_dir",      type=str,   default=None)
     p.add_argument("--log_dir",       type=str,   default=None)
     p.add_argument("--viz_dir",       type=str,   default=None)
@@ -236,6 +238,17 @@ def main():
 
     # ── Data ────────────────────────────────────────────────────────────
     train_loader, val_loader = get_cifar100_loaders(batch_size=args.batch_size)
+    # If user provided a custom validation dataset (ImageFolder layout), use it
+    if args.val_data_dir is not None:
+        try:
+            from data.val_loader import get_val_loader_from_dir
+            val_loader = get_val_loader_from_dir(
+                args.val_data_dir,
+                batch_size=args.batch_size,
+            )
+        except Exception as e:
+            print(f"Failed to load custom val dataset from {args.val_data_dir}: {e}")
+            print("Falling back to CIFAR-100 validation set.")
 
     # ── Model ───────────────────────────────────────────────────────────
     merge_layers = [] if args.no_freqmerge else args.merge_layers
