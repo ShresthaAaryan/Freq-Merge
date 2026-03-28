@@ -90,8 +90,8 @@ def parse_args():
         "--dataset",
         type=str,
         default=cfg.DEFAULT_SKIN_DATASET,
-        choices=["ham10000", "isic2019"],
-        help="Skin lesion dataset root under data/ham10000 or data/isic2019.",
+        choices=["ham10000", "ham1000", "isic2019"],
+        help="HAM10000 (alias: ham1000) or ISIC 2019 under data/ham10000 or data/isic2019.",
     )
     return p.parse_args()
 
@@ -231,7 +231,9 @@ def main():
 
     # ── Banner ──────────────────────────────────────────────────────────
     print(f"\n{'='*62}")
-    ds_label = "HAM10000" if args.dataset == "ham10000" else "ISIC 2019"
+    ds_label = (
+        "HAM10000" if args.dataset in ("ham10000", "ham1000") else "ISIC 2019"
+    )
     print(f"  FreqMerge Training — {ds_label}")
     print(f"  Device       : {device}  "
           f"({'AMP float16 enabled' if use_amp else 'full float32'})")

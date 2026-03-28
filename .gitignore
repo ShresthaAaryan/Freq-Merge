@@ -27,10 +27,6 @@ visualizations/
 *.pt
 
 # Dataset downloads (ignore heavy image folders; keep data/*.py tracked)
-# CIFAR / torchvision cache — never commit (GitHub 100 MB limit)
-data/cifar100/
-**/cifar-100-python/
-
 data/ham10000/train/
 data/ham10000/val/
 data/ham10000/test/

@@ -15,18 +15,14 @@
 
 ---
 
-## Example results (historical CIFAR-100 benchmark)
+## Datasets (HAM10000 and ISIC 2019)
 
-| Method               | Params (M) | GFLOPs ↓ | Throughput (img/s) ↑ | Top-1 (%) ↑ |
-|----------------------|:----------:|:--------:|:--------------------:|:-----------:|
-| ViT-Small (Baseline) | 22.1       | 4.61     | 975                  | 83.74       |
-| DynamicViT (r=0.5)   | 25.4       | 2.90     | 1510                 | 81.40       |
-| ToMe (r=0.5)         | 22.1       | 2.70     | 1575                 | 80.38       |
-| **FreqMerge (Ours)** | **22.1**   | **2.75** | **1560**             | **82.65**   |
+Training and evaluation use **dermoscopic skin-lesion** data only:
 
-- **−40 % FLOPs** vs. ViT-Small baseline
-- **+2.27 % Top-1 accuracy** vs. ToMe at the same token budget
-- **Zero additional parameters** — LFGM is entirely parameter-free
+- **[HAM10000](https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/DBW86T)** — seven diagnostic categories in the standard release; arrange images as `ImageFolder` under `data/ham10000/`.
+- **ISIC 2019** — use the official challenge splits or your own class folders under `data/isic2019/` (class count follows your directory layout).
+
+Report accuracy, FLOPs, and throughput with `train.py` / `evaluate.py` on your local splits; numbers depend on preprocessing and the exact ISIC subset.
 
 ---
 
@@ -78,7 +74,7 @@ data/isic2019/val/<class_name>/*.jpg
 
 If you only have a `test` split instead of `val`, name it `test` — the loader accepts that. Class folders must match between train and validation.
 
-Default training dataset is **HAM10000** (`config.DEFAULT_SKIN_DATASET`). Switch with `--dataset isic2019`.
+Default training dataset is **HAM10000** (`config.DEFAULT_SKIN_DATASET`). Switch with `--dataset isic2019`. You can also pass `--dataset ham1000` as an alias for HAM10000.
 
 ---
 
@@ -204,13 +200,7 @@ python evaluate.py --ckpt checkpoints/best_model.pth --no_freqmerge
 python ablation.py --study alpha --ckpt checkpoints/best_model.pth
 ```
 
-| α              | Top-1 (%) | Throughput (img/s) |
-|----------------|:---------:|:-----------------:|
-| 0.00 (= ToMe)  | 80.38     | 1575              |
-| 0.25           | 81.90     | 1570              |
-| 0.50           | 82.40     | 1565              |
-| **0.70**       | **82.65** | **1560**          |
-| 1.00           | 82.10     | 1545              |
+Metrics are written to `logs/ablation_results.json` (Top-1 / throughput depend on HAM10000 vs. ISIC 2019 and your hardware).
 
 ### Token scoring strategy comparison
 
@@ -218,11 +208,7 @@ python ablation.py --study alpha --ckpt checkpoints/best_model.pth
 python ablation.py --study scoring --ckpt checkpoints/best_model.pth
 ```
 
-| Strategy              | Top-1 (%) | Throughput (img/s) |
-|-----------------------|:---------:|:-----------------:|
-| Random Pruning        | 78.20     | 1590              |
-| Attention-Based Score | 81.80     | 1555              |
-| **LFGM (Ours)**       | **82.65** | **1560**          |
+Compare strategies using the same checkpoint and validation loader; see `ablation_results.json` for numeric outputs.
 
 ### Run all ablations in one command
 

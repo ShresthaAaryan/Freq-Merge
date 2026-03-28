@@ -121,7 +121,7 @@ def parse_args():
         "--dataset",
         type=str,
         default=cfg.DEFAULT_SKIN_DATASET,
-        choices=["ham10000", "isic2019"],
+        choices=["ham10000", "ham1000", "isic2019"],
         help="Must match the dataset the checkpoint was trained on.",
     )
     return parser.parse_args()

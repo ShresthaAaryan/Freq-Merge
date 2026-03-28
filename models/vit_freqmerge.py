@@ -16,7 +16,7 @@ prepended to the reduced sequence at each step.
 Usage
 -----
     model = build_freqmerge_vit(
-        num_classes  = 100,
+        num_classes  = 7,
         merge_layers = [4, 6, 8, 10],
         keep_rate    = 0.7,
         alpha        = 0.7,
@@ -87,7 +87,7 @@ class FreqMergeEncoderBlock(nn.Module):
 # ---------------------------------------------------------------------------
 
 def build_freqmerge_vit(
-    num_classes:  int   = 100,
+    num_classes:  int   = 7,
     merge_layers: list  = None,
     keep_rate:    float = 0.7,
     alpha:        float = 0.7,
