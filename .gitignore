@@ -28,6 +28,7 @@ visualizations/
 
 # Dataset downloads (ignore heavy image folders; keep data/*.py tracked)
 data/data/ham10000_raw/
+data/data/ham10000/
 data/ham10000/train/
 data/ham10000/val/
 data/ham10000/test/

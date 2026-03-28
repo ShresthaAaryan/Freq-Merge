@@ -9,8 +9,9 @@ import os
 # Paths
 # ---------------------------------------------------------------------------
 _DATA_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-# Default HAM root (override with train.py --data_root). Typical layout: <root>/train|val/<class>/
-HAM10000_DIR = os.path.join(_DATA_ROOT, "data", "ham10000_raw")
+# HAM10000 ImageFolder root (<root>/train|val/<dx>/). Run scripts/prepare_ham_imagefolder.py
+# on the raw Dataverse download (see data/data/ham10000_raw).
+HAM10000_DIR = os.path.join(_DATA_ROOT, "data", "ham10000")
 ISIC2019_DIR = os.path.join(_DATA_ROOT, "isic2019")
 # Default dataset for CLI when --dataset is omitted
 DEFAULT_SKIN_DATASET = "ham10000"
