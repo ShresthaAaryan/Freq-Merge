@@ -9,7 +9,8 @@ import os
 # Paths
 # ---------------------------------------------------------------------------
 _DATA_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-HAM10000_DIR = os.path.join(_DATA_ROOT, "ham10000")
+# Default HAM root (override with train.py --data_root). Typical layout: <root>/train|val/<class>/
+HAM10000_DIR = os.path.join(_DATA_ROOT, "data", "ham10000_raw")
 ISIC2019_DIR = os.path.join(_DATA_ROOT, "isic2019")
 # Default dataset for CLI when --dataset is omitted
 DEFAULT_SKIN_DATASET = "ham10000"

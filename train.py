@@ -17,18 +17,18 @@ CUDA features
 
 Run
 ---
-    python train.py                          # default config
+    python train.py                          # default config (seed 42)
+    python train.py --seeds 42 43 44 --dataset ham1000   # HAM, 3 runs + summary JSON
+    python train.py --run_root runs/my_ham --seeds 42 43  # custom parent folder
     python train.py --alpha 0.7              # custom frequency penalty
     python train.py --no_amp                 # disable mixed precision
     python train.py --no_freqmerge           # plain ViT-Small baseline
 """
 
-import os
-import sys
 import argparse
-import random
 import json
-import time
+import os
+import statistics
 
 import numpy as np
 import torch
@@ -92,6 +92,26 @@ def parse_args():
         default=cfg.DEFAULT_SKIN_DATASET,
         choices=["ham10000", "ham1000", "isic2019"],
         help="HAM10000 (alias: ham1000) or ISIC 2019 under data/ham10000 or data/isic2019.",
+    )
+    p.add_argument(
+        "--data_root",
+        type=str,
+        default=None,
+        help="Folder containing train/ and val/ (or test/). Overrides config paths.",
+    )
+    p.add_argument(
+        "--seeds",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Train once per seed (e.g. 42 43 44 for mean±std). Uses run_root layout.",
+    )
+    p.add_argument(
+        "--run_root",
+        type=str,
+        default=None,
+        help="Parent folder for multi-seed runs: <run_root>/seed_<s>/checkpoints|logs|visualizations. "
+        "Default: ./runs/<dataset>_seeds when --seeds has more than one value, or when set with one seed.",
     )
     return p.parse_args()
 
@@ -209,32 +229,61 @@ def validate(
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Directory layout (single run vs multi-seed / --run_root)
 # ---------------------------------------------------------------------------
 
-def main():
-    args    = parse_args()
-    # Resolve path defaults that couldn't use cfg.* in argparse
-    if args.ckpt_dir is None: args.ckpt_dir = cfg.CKPT_DIR
-    if args.log_dir  is None: args.log_dir  = cfg.LOG_DIR
-    if args.viz_dir  is None: args.viz_dir  = cfg.VIZ_DIR
 
+def _resolve_run_dirs(args, seed: int, all_seeds: list[int]):
+    """
+    Single-seed default: cfg ckpt/log/viz (or CLI overrides).
+    Multi-seed or --run_root: <parent>/seed_<seed>/{checkpoints,logs,visualizations}.
+    """
+    proj = os.path.dirname(os.path.abspath(__file__))
+    use_nested = len(all_seeds) > 1 or args.run_root is not None
+    if use_nested:
+        parent = (
+            args.run_root
+            if args.run_root is not None
+            else os.path.join(proj, "runs", f"{args.dataset}_seeds")
+        )
+        root = os.path.join(parent, f"seed_{seed}")
+        ck = os.path.join(root, "checkpoints")
+        lg = os.path.join(root, "logs")
+        vz = os.path.join(root, "visualizations")
+        return ck, lg, vz, parent
+
+    ck = args.ckpt_dir if args.ckpt_dir is not None else cfg.CKPT_DIR
+    lg = args.log_dir if args.log_dir is not None else cfg.LOG_DIR
+    vz = args.viz_dir if args.viz_dir is not None else cfg.VIZ_DIR
+    return ck, lg, vz, None
+
+
+# ---------------------------------------------------------------------------
+# One full training run
+# ---------------------------------------------------------------------------
+
+
+def run_training_session(
+    args,
+    seed: int,
+    ckpt_dir: str,
+    log_dir: str,
+    viz_dir: str,
+) -> dict:
+    """Train for ``args.epochs``; return a summary dict for tables / JSON."""
     use_amp = (not args.no_amp) and cfg.USE_AMP
 
-    # ── CUDA setup ──────────────────────────────────────────────────────
-    device = setup_cuda(seed=args.seed)
+    device = setup_cuda(seed=seed)
     print_gpu_info()
 
-    # ── Directories ─────────────────────────────────────────────────────
-    for d in (args.ckpt_dir, args.log_dir, args.viz_dir):
+    for d in (ckpt_dir, log_dir, viz_dir):
         os.makedirs(d, exist_ok=True)
 
-    # ── Banner ──────────────────────────────────────────────────────────
     print(f"\n{'='*62}")
     ds_label = (
         "HAM10000" if args.dataset in ("ham10000", "ham1000") else "ISIC 2019"
     )
-    print(f"  FreqMerge Training — {ds_label}")
+    print(f"  FreqMerge Training — {ds_label}  |  seed={seed}")
     print(f"  Device       : {device}  "
           f"({'AMP float16 enabled' if use_amp else 'full float32'})")
     print(f"  FreqMerge    : {'DISABLED (baseline)' if args.no_freqmerge else 'ENABLED'}")
@@ -242,27 +291,26 @@ def main():
         print(f"  Merge layers : {args.merge_layers}")
         print(f"  Keep rate    : {args.keep_rate}   Alpha (α): {args.alpha}")
     print(f"  Epochs       : {args.epochs}   Batch: {args.batch_size}   LR: {args.lr}")
+    print(f"  Checkpoints  : {ckpt_dir}")
     print(f"{'='*62}\n")
 
-    # ── Data ────────────────────────────────────────────────────────────
     train_loader, val_loader, num_classes, _ = get_skin_loaders(
         dataset=args.dataset,
+        data_root=args.data_root,
         batch_size=args.batch_size,
     )
 
-    # ── Model ───────────────────────────────────────────────────────────
     merge_layers = [] if args.no_freqmerge else args.merge_layers
     model = build_freqmerge_vit(
-        num_classes  = num_classes,
-        merge_layers = merge_layers,
-        keep_rate    = args.keep_rate,
-        alpha        = args.alpha,
-        hpf_radius   = args.hpf_radius,
-        pretrained   = args.pretrained,
-        backbone     = args.backbone,
+        num_classes=num_classes,
+        merge_layers=merge_layers,
+        keep_rate=args.keep_rate,
+        alpha=args.alpha,
+        hpf_radius=args.hpf_radius,
+        pretrained=args.pretrained,
+        backbone=args.backbone,
     ).to(device)
 
-    # Multi-GPU wrapping (DataParallel)
     if not args.no_multi_gpu:
         model = maybe_wrap_data_parallel(model, device)
 
@@ -270,14 +318,12 @@ def main():
     print(f"Model parameters: {total_params:,}")
     print_memory_stats("after model load", device)
 
-    # ── Loss / Optimizer / Scheduler / GradScaler ───────────────────────
     criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
 
-    # Unwrap DataParallel to access named parameters
     raw_model = model.module if isinstance(model, nn.DataParallel) else model
-    backbone_params  = []
+    backbone_params = []
     freqmerge_params = []
-    head_params      = []
+    head_params = []
     for name, param in raw_model.named_parameters():
         if "head" in name:
             head_params.append(param)
@@ -286,40 +332,51 @@ def main():
         else:
             backbone_params.append(param)
 
-    optimizer = optim.AdamW([
-        {"params": backbone_params,  "lr": args.lr * 0.1},
-        {"params": head_params,      "lr": args.lr},
-        {"params": freqmerge_params, "lr": args.lr},
-    ], weight_decay=args.weight_decay)
+    optimizer = optim.AdamW(
+        [
+            {"params": backbone_params, "lr": args.lr * 0.1},
+            {"params": head_params, "lr": args.lr},
+            {"params": freqmerge_params, "lr": args.lr},
+        ],
+        weight_decay=args.weight_decay,
+    )
 
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=cfg.LR_MIN)
 
-    # GradScaler — only active when use_amp=True and device is cuda
     scaler = GradScaler(device=device.type, enabled=use_amp)
 
-    # ── Training loop ───────────────────────────────────────────────────
-    history  = {"train_loss": [], "val_loss": [], "train_acc1": [], "val_acc1": [], "lr": []}
+    history = {"train_loss": [], "val_loss": [], "train_acc1": [], "val_acc1": [], "lr": []}
     best_val = 0.0
-    best_ckpt = os.path.join(args.ckpt_dir, "best_model.pth")
+    best_ckpt = os.path.join(ckpt_dir, "best_model.pth")
+    best_epoch = 0
 
-    print(f"Loading images at {cfg.IMAGE_SIZE}×{cfg.IMAGE_SIZE} ({num_classes} classes)...")
+    print(
+        f"Loading images at {cfg.IMAGE_SIZE}×{cfg.IMAGE_SIZE} ({num_classes} classes)..."
+    )
     if not args.no_freqmerge:
-        print(f"Starting training with FreqMerge "
-              f"(keep_rate={args.keep_rate}, alpha={args.alpha})...")
+        print(
+            f"Starting training with FreqMerge "
+            f"(keep_rate={args.keep_rate}, alpha={args.alpha})..."
+        )
     else:
         print("Starting training — plain ViT-Small baseline...")
 
     for epoch in range(1, args.epochs + 1):
         reset_peak_memory_stats(device)
 
-        # ── Timed training pass (CUDA Events for accurate GPU timing) ──
         with CUDATimer(f"epoch {epoch} train", verbose=False) as t_train:
             train_loss, train_acc = train_one_epoch(
-                model, train_loader, criterion, optimizer,
-                scaler, device, epoch, args.epochs, use_amp,
+                model,
+                train_loader,
+                criterion,
+                optimizer,
+                scaler,
+                device,
+                epoch,
+                args.epochs,
+                use_amp,
             )
 
-        # ── Timed validation pass ──────────────────────────────────────
         with CUDATimer(f"epoch {epoch} val", verbose=False) as t_val:
             val_loss, val_acc = validate(
                 model, val_loader, criterion, device, use_amp,
@@ -330,54 +387,116 @@ def main():
 
         ep_time_s = (t_train.elapsed_ms + t_val.elapsed_ms) / 1000.0
 
-        # ── Record ─────────────────────────────────────────────────────
         history["train_loss"].append(train_loss)
         history["val_loss"].append(val_loss)
         history["train_acc1"].append(train_acc)
         history["val_acc1"].append(val_acc)
         history["lr"].append(current_lr)
 
-        # ── Console output ─────────────────────────────────────────────
         print(f"--- Epoch {epoch}/{args.epochs} Completed in {ep_time_s:.1f}s ---")
-        print(f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}% "
-              f"| Val Acc: {val_acc:.2f}%")
+        print(
+            f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}% "
+            f"| Val Acc: {val_acc:.2f}%"
+        )
         print_memory_stats(f"epoch {epoch}", device)
 
-        # ── Save best checkpoint ───────────────────────────────────────
         if val_acc > best_val:
             best_val = val_acc
+            best_epoch = epoch
             save_dict = {
-                "epoch":      epoch,
+                "epoch": epoch,
                 "state_dict": raw_model.state_dict(),
-                "optimizer":  optimizer.state_dict(),
-                "scaler":     scaler.state_dict(),     # save AMP scale state
-                "val_acc":    val_acc,
-                "args":       vars(args),
+                "optimizer": optimizer.state_dict(),
+                "scaler": scaler.state_dict(),
+                "val_acc": val_acc,
+                "seed": seed,
+                "args": vars(args),
             }
             torch.save(save_dict, best_ckpt)
             print(f"  ✓ New best: {val_acc:.2f}%  →  {best_ckpt}")
 
-        # ── Periodic CUDA cache clear ──────────────────────────────────
         n = cfg.EMPTY_CACHE_EVERY_N_EPOCHS
         if n > 0 and epoch % n == 0:
             clear_cuda_cache()
             print(f"  [CUDA] Cache cleared at epoch {epoch}.")
 
-    # ── Post-training ────────────────────────────────────────────────────
-    history_path = os.path.join(args.log_dir, "training_history.json")
-    with open(history_path, "w") as f:
+    history_path = os.path.join(log_dir, "training_history.json")
+    with open(history_path, "w", encoding="utf-8") as f:
         json.dump(history, f, indent=2)
     print(f"\nTraining history saved → {history_path}")
 
-    curve_path = os.path.join(args.viz_dir, "training_curves.png")
+    curve_path = os.path.join(viz_dir, "training_curves.png")
     plot_training_curves(history, save_path=curve_path)
 
     print(f"\n{'='*62}")
-    print(f"  Training complete.")
-    print(f"  Best Val Top-1 : {best_val:.2f}%")
+    print("  Training complete.")
+    print(f"  Seed           : {seed}")
+    print(f"  Best Val Top-1 : {best_val:.2f}% (epoch {best_epoch})")
     print(f"  Checkpoint     : {best_ckpt}")
     print_memory_stats("final", device)
     print(f"{'='*62}\n")
+
+    return {
+        "seed": seed,
+        "best_val_top1": best_val,
+        "best_epoch": best_epoch,
+        "checkpoint": best_ckpt,
+        "history_path": history_path,
+        "curves_path": curve_path,
+        "log_dir": log_dir,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+
+def main():
+    args = parse_args()
+    if args.ckpt_dir is None:
+        args.ckpt_dir = cfg.CKPT_DIR
+    if args.log_dir is None:
+        args.log_dir = cfg.LOG_DIR
+    if args.viz_dir is None:
+        args.viz_dir = cfg.VIZ_DIR
+
+    seeds = args.seeds if args.seeds else [args.seed]
+    summaries: list[dict] = []
+    parent_for_summary: str | None = None
+
+    for seed in seeds:
+        ckpt_dir, log_dir, viz_dir, parent_for_summary = _resolve_run_dirs(
+            args, seed, seeds
+        )
+        summaries.append(
+            run_training_session(args, seed, ckpt_dir, log_dir, viz_dir)
+        )
+
+    if parent_for_summary is not None and len(summaries) > 0:
+        accs = [float(s["best_val_top1"]) for s in summaries]
+        mean_acc = statistics.mean(accs)
+        try:
+            std_acc = statistics.pstdev(accs) if len(accs) > 1 else 0.0
+        except statistics.StatisticsError:
+            std_acc = 0.0
+        out = {
+            "dataset": args.dataset,
+            "seeds": seeds,
+            "runs": summaries,
+            "best_val_top1_mean": mean_acc,
+            "best_val_top1_std": std_acc,
+        }
+        summ_path = os.path.join(parent_for_summary, "multi_run_summary.json")
+        with open(summ_path, "w", encoding="utf-8") as f:
+            json.dump(out, f, indent=2)
+        print(
+            f"Multi-run summary: best Val Top-1 = {mean_acc:.2f} ± {std_acc:.2f}% "
+            f"(population stdev over seeds)"
+        )
+        print(f"Saved → {summ_path}")
+    elif len(summaries) == 1:
+        print(f"Single run best Val Top-1: {summaries[0]['best_val_top1']:.2f}%")
 
 
 if __name__ == "__main__":

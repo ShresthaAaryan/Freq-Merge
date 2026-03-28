@@ -261,6 +261,12 @@ def parse_args():
         choices=["ham10000", "ham1000", "isic2019"],
         help="Must match the dataset the checkpoint was trained on.",
     )
+    parser.add_argument(
+        "--data_root",
+        type=str,
+        default=None,
+        help="Folder containing train/ and val/ (or test/). Overrides config paths.",
+    )
     return parser.parse_args()
 
 
@@ -277,6 +283,7 @@ def main():
 
     _, val_loader, num_classes, _ = get_skin_loaders(
         dataset=args.dataset,
+        data_root=args.data_root,
         batch_size=cfg.BATCH_SIZE,
     )
 

@@ -12,106 +12,85 @@ Run
 Outputs
 -------
     - Top-1 / Top-5 validation accuracy
-    - GFLOPs estimate (via a dummy forward pass hook)
-    - Throughput (images/sec) if --benchmark is set
-    - Heatmap visualisation if --visualize is set
-    - Confusion matrix if --confusion is set
+    - sklearn: balanced accuracy, kappa, macro/micro/weighted P/R/F1, per-class report
+    - Params (total / trainable / millions)
+    - GFLOPs: hook estimate + thop MACs (2× as FLOPs) when available
+    - Latency (ms) mean±std, per-image; throughput (img/s); peak CUDA memory (MB)
+    - JSON summary → logs/eval_metrics.json (disable with --no_save_json)
+    - Heatmap / confusion matrix with optional flags
 """
 
-import os
-import sys
+from __future__ import annotations
+
 import argparse
 import json
+import math
+import os
 
+import numpy as np
 import torch
 import torch.nn as nn
-from tqdm import tqdm
-
 from torch.amp import autocast
+from tqdm import tqdm
 
 import config as cfg
 from data.skin_datasets import get_skin_loaders
 from models.vit_freqmerge import build_freqmerge_vit
-from utils.metrics import AverageMeter, accuracy, compute_throughput
-from utils.visualize import (
-    visualize_freq_scores,
-    plot_confusion_matrix,
-)
 from utils.cuda_utils import (
-    setup_cuda,
+    CUDATimer,
     print_gpu_info,
     print_memory_stats,
-    CUDATimer,
+    setup_cuda,
 )
+from utils.metrics import AverageMeter, accuracy, compute_throughput
+from utils.paper_metrics import (
+    build_full_eval_report,
+    estimate_gflops_hook,
+    estimate_thop_macs_gflops,
+    measure_latency_ms,
+    measure_peak_memory_forward_mb,
+)
+from utils.visualize import plot_confusion_matrix, visualize_freq_scores
 
 
-# ---------------------------------------------------------------------------
-# FLOP counting (via forward hook)
-# ---------------------------------------------------------------------------
-
-def count_flops(model: nn.Module, input_size=(1, 3, 224, 224), device="cpu") -> float:
-    """
-    Estimate total GFLOPs for a single forward pass via a forward hook on
-    nn.Linear and nn.Conv2d layers.
-
-    Note: This is an approximation — attention FLOPs are counted separately
-    because timm's MHSA is implemented as nn.Linear projections.
-
-    Returns
-    -------
-    float  GFLOPs (10^9 FLOPs)
-    """
-    flops = [0.0]
-
-    def linear_hook(module, inp, out):
-        # FLOPs for a linear layer: 2 * in_features * out_features * batch_elements
-        in_feat  = module.in_features
-        out_feat = module.out_features
-        # inp[0] shape: (B, *, in_feat)
-        batch_el = inp[0].numel() // in_feat
-        flops[0] += 2.0 * in_feat * out_feat * batch_el
-
-    def conv_hook(module, inp, out):
-        # FLOPs for conv: 2 * Cin * Cout * k^2 * H_out * W_out
-        Cout, Cin_g, kH, kW = module.weight.shape
-        H_out, W_out = out.shape[-2], out.shape[-1]
-        groups  = module.groups
-        Cin     = Cin_g * groups
-        batch   = out.shape[0]
-        flops[0] += 2.0 * (Cin / groups) * Cout * kH * kW * H_out * W_out * batch
-
-    hooks = []
-    for m in model.modules():
-        if isinstance(m, nn.Linear):
-            hooks.append(m.register_forward_hook(linear_hook))
-        elif isinstance(m, nn.Conv2d):
-            hooks.append(m.register_forward_hook(conv_hook))
-
-    dummy = torch.zeros(*input_size).to(device)
-    model.eval().to(device)
-    with torch.no_grad():
-        model(dummy)
-
-    for h in hooks:
-        h.remove()
-
-    return flops[0] / 1e9
+def _to_jsonable(obj):
+    """Convert numpy types and non-finite floats for JSON."""
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return {str(k): _to_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_jsonable(v) for v in obj]
+    if isinstance(obj, (np.floating, float)):
+        f = float(obj)
+        if math.isnan(f) or math.isinf(f):
+            return None
+        return f
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, (np.bool_,)):
+        return bool(obj)
+    return obj
 
 
 # ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
 
+
 def parse_args():
+    default_metrics = os.path.join(cfg.LOG_DIR, "eval_metrics.json")
     parser = argparse.ArgumentParser(description="FreqMerge Evaluation")
-    parser.add_argument("--ckpt",        type=str, default=None,
+    parser.add_argument("--ckpt", type=str, default=None,
                         help="Path to checkpoint .pth file.")
-    parser.add_argument("--batch_size",  type=int, default=32)
-    parser.add_argument("--benchmark",   action="store_true",
-                        help="Run throughput benchmark.")
-    parser.add_argument("--visualize",   action="store_true",
+    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--benchmark", action="store_true",
+                        help="Alias: ensures throughput is measured (on by default).")
+    parser.add_argument("--visualize", action="store_true",
                         help="Generate LFGM heatmap visualizations.")
-    parser.add_argument("--confusion",   action="store_true",
+    parser.add_argument("--confusion", action="store_true",
                         help="Plot confusion matrix.")
     parser.add_argument("--no_freqmerge", action="store_true",
                         help="Evaluate plain ViT-Small baseline.")
@@ -124,6 +103,33 @@ def parse_args():
         choices=["ham10000", "ham1000", "isic2019"],
         help="Must match the dataset the checkpoint was trained on.",
     )
+    parser.add_argument(
+        "--data_root",
+        type=str,
+        default=None,
+        help="Folder containing train/ and val/ (or test/). Overrides config paths.",
+    )
+    parser.add_argument(
+        "--save_metrics",
+        type=str,
+        default=default_metrics,
+        help="Write full metric dict as JSON to this path.",
+    )
+    parser.add_argument(
+        "--no_save_json",
+        action="store_true",
+        help="Do not write eval_metrics JSON.",
+    )
+    parser.add_argument(
+        "--no_efficiency_suite",
+        action="store_true",
+        help="Skip thop, latency, throughput, and peak-memory benchmarks.",
+    )
+    parser.add_argument(
+        "--no_sklearn_metrics",
+        action="store_true",
+        help="Do not collect predictions; skips balanced acc / F1 / per-class report.",
+    )
     return parser.parse_args()
 
 
@@ -131,8 +137,9 @@ def parse_args():
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main():
-    args   = parse_args()
+    args = parse_args()
     device = setup_cuda()
     print_gpu_info()
     use_amp = (not args.no_amp) and cfg.USE_AMP and device.type == "cuda"
@@ -143,44 +150,58 @@ def main():
     print(f"  Ckpt    : {args.ckpt or '(no checkpoint — random weights)'}")
     print(f"{'='*60}\n")
 
-    # ---- Data ----------------------------------------------------------
-    _, val_loader, num_classes, _ = get_skin_loaders(
+    _, val_loader, num_classes, class_names = get_skin_loaders(
         dataset=args.dataset,
+        data_root=args.data_root,
         batch_size=args.batch_size,
     )
 
-    # ---- Model ---------------------------------------------------------
     merge_layers = [] if args.no_freqmerge else cfg.MERGE_LAYERS
     model = build_freqmerge_vit(
-        num_classes  = num_classes,
-        merge_layers = merge_layers,
-        keep_rate    = cfg.KEEP_RATE,
-        alpha        = cfg.ALPHA,
-        hpf_radius   = cfg.HPF_RADIUS,
-        pretrained   = False,              # load weights from ckpt
+        num_classes=num_classes,
+        merge_layers=merge_layers,
+        keep_rate=cfg.KEEP_RATE,
+        alpha=cfg.ALPHA,
+        hpf_radius=cfg.HPF_RADIUS,
+        pretrained=False,
     ).to(device)
 
-    # Load checkpoint
     if args.ckpt and os.path.isfile(args.ckpt):
         ckpt = torch.load(args.ckpt, map_location=device)
         model.load_state_dict(ckpt["state_dict"])
+        acc_msg = ckpt.get("val_acc")
+        acc_str = f"{acc_msg:.2f}%" if isinstance(acc_msg, (int, float)) else str(acc_msg)
         print(f"Loaded checkpoint from epoch {ckpt.get('epoch', '?')}  "
-              f"(recorded val acc: {ckpt.get('val_acc', '?'):.2f}%)\n")
+              f"(recorded val acc: {acc_str})\n")
     else:
         print("WARNING: No checkpoint loaded — using current weights.\n")
 
-    # ---- GFLOPs --------------------------------------------------------
-    gflops = count_flops(model, input_size=(1, 3, cfg.IMAGE_SIZE, cfg.IMAGE_SIZE),
-                         device=device)
-    print(f"GFLOPs (single image): {gflops:.2f} G")
+    gflops = estimate_gflops_hook(
+        model,
+        input_size=(1, 3, cfg.IMAGE_SIZE, cfg.IMAGE_SIZE),
+        device=device,
+    )
+    print(f"GFLOPs hook estimate (1×{cfg.IMAGE_SIZE}, 1 image): {gflops:.2f} G")
 
-    # ---- Validation accuracy -------------------------------------------
+    macs_g, flops_thop_g = None, None
+    if not args.no_efficiency_suite:
+        macs_g, flops_thop_g = estimate_thop_macs_gflops(
+            model,
+            input_size=(1, 3, cfg.IMAGE_SIZE, cfg.IMAGE_SIZE),
+            device=device,
+        )
+        if macs_g is not None:
+            print(f"thop MACs (1 image): {macs_g:.2f} G  |  2×MACs FLOPs: {flops_thop_g:.2f} G")
+        else:
+            print("thop: skipped (unavailable or failed on this model graph).")
+
     criterion = nn.CrossEntropyLoss()
     loss_meter = AverageMeter("Loss")
     acc1_meter = AverageMeter("Top-1")
     acc5_meter = AverageMeter("Top-5")
 
-    all_preds, all_labels = [], []
+    all_preds: list[int] = []
+    all_labels: list[int] = []
 
     model.eval()
     with torch.no_grad():
@@ -191,7 +212,7 @@ def main():
 
                 with autocast(device_type=device.type, enabled=use_amp):
                     logits = model(images)
-                    loss   = criterion(logits, labels)
+                    loss = criterion(logits, labels)
 
                 acc1, acc5 = accuracy(logits.float(), labels, topk=(1, 5))
                 B = images.size(0)
@@ -199,22 +220,31 @@ def main():
                 acc1_meter.update(acc1, B)
                 acc5_meter.update(acc5, B)
 
-                if args.confusion:
+                if not args.no_sklearn_metrics:
                     preds = logits.argmax(dim=1).cpu().tolist()
                     all_preds.extend(preds)
                     all_labels.extend(labels.cpu().tolist())
 
+    eval_time_s = t_eval.elapsed_ms / 1000.0
+
     print(f"\n{'─'*40}")
-    print(f"  Eval time  : {t_eval.elapsed_ms/1000:.2f}s")
+    print(f"  Eval time  : {eval_time_s:.2f}s")
     print(f"  Val Loss   : {loss_meter.avg:.4f}")
     print(f"  Val Top-1  : {acc1_meter.avg:.2f}%")
     print(f"  Val Top-5  : {acc5_meter.avg:.2f}%")
     print(f"{'─'*40}\n")
     print_memory_stats("after eval", device)
 
-    # ---- Throughput benchmark ------------------------------------------
-    if args.benchmark:
-        print("Running throughput benchmark …")
+    tput: float | None = None
+    lat_m: float | None = None
+    lat_s: float | None = None
+    lat_1_m: float | None = None
+    lat_1_s: float | None = None
+    peak_mb: float | None = None
+
+    run_efficiency = (not args.no_efficiency_suite) or args.benchmark
+    if run_efficiency:
+        print("Efficiency benchmarks (eval batch size) …")
         tput = compute_throughput(
             model,
             input_size=(args.batch_size, 3, cfg.IMAGE_SIZE, cfg.IMAGE_SIZE),
@@ -222,42 +252,131 @@ def main():
             n_warmup=30,
             n_measure=100,
         )
-        print(f"  Throughput : {tput:.1f} images/sec "
-              f"(batch={args.batch_size})\n")
+        print(f"  Throughput : {tput:.1f} images/sec  (batch={args.batch_size})")
 
-    # ---- LFGM heatmap visualisation ------------------------------------
+        lat_m, lat_s = measure_latency_ms(
+            model,
+            device,
+            batch_size=args.batch_size,
+            image_size=cfg.IMAGE_SIZE,
+            n_warmup=30,
+            n_measure=100,
+        )
+        lat_1_m = lat_m / args.batch_size
+        lat_1_s = lat_s / args.batch_size
+        print(
+            f"  Latency    : {lat_m:.2f} ± {lat_s:.2f} ms/batch  "
+            f"({lat_1_m:.2f} ± {lat_1_s:.2f} ms/image)"
+        )
+
+        peak_mb = measure_peak_memory_forward_mb(
+            model,
+            device,
+            batch_size=args.batch_size,
+            image_size=cfg.IMAGE_SIZE,
+        )
+        if peak_mb is not None:
+            print(f"  Peak VRAM (forward, 1 batch): {peak_mb:.1f} MB")
+        print()
+
     if args.visualize:
         os.makedirs(cfg.VIZ_DIR, exist_ok=True)
-        # Grab a batch from the val loader
         sample_images, _ = next(iter(val_loader))
         save_path = os.path.join(cfg.VIZ_DIR, "lfgm_heatmaps.png")
         visualize_freq_scores(
-            images    = sample_images,
-            model     = model,
-            save_path = save_path,
-            n_samples = min(8, args.batch_size),
-            device    = str(device),
+            images=sample_images,
+            model=model,
+            save_path=save_path,
+            n_samples=min(8, args.batch_size),
+            device=str(device),
         )
 
-    # ---- Confusion matrix ----------------------------------------------
     if args.confusion and all_preds:
+        os.makedirs(cfg.VIZ_DIR, exist_ok=True)
         save_path = os.path.join(cfg.VIZ_DIR, "confusion_matrix.png")
         plot_confusion_matrix(
-            all_preds  = all_preds,
-            all_labels = all_labels,
-            top_n      = 20,
-            save_path  = save_path,
+            all_preds=all_preds,
+            all_labels=all_labels,
+            top_n=20,
+            save_path=save_path,
         )
 
-    # ---- Summary -------------------------------------------------------
-    print("Evaluation Results Summary")
+    print("Evaluation summary (paper-style)")
     print(f"  Method       : {'ViT-Small (baseline)' if args.no_freqmerge else 'FreqMerge'}")
-    print(f"  Top-1 Acc    : {acc1_meter.avg:.2f}%")
-    print(f"  Top-5 Acc    : {acc5_meter.avg:.2f}%")
-    print(f"  GFLOPs       : {gflops:.2f} G")
-    if args.benchmark:
-        print(f"  Throughput   : {tput:.1f} img/s")
-    print()
+    print(f"  Top-1 / Top-5: {acc1_meter.avg:.2f}% / {acc5_meter.avg:.2f}%")
+
+    if not args.no_sklearn_metrics and all_preds:
+        from utils.paper_metrics import classification_metrics_block
+
+        blk = classification_metrics_block(all_labels, all_preds, class_names)
+        print(f"  Balanced acc : {blk['balanced_accuracy']:.4f}")
+        print(f"  Macro F1     : {blk['f1_macro']:.4f}  |  Weighted F1: {blk['f1_weighted']:.4f}")
+        print(f"  Cohen κ      : {blk['cohen_kappa']:.4f}")
+
+    if not args.no_save_json:
+        _metric_dir = os.path.dirname(os.path.abspath(args.save_metrics))
+        if _metric_dir:
+            os.makedirs(_metric_dir, exist_ok=True)
+        if args.no_sklearn_metrics or not all_preds:
+            report = {
+                "classification": {
+                    "top1_accuracy_pct": acc1_meter.avg,
+                    "top5_accuracy_pct": acc5_meter.avg,
+                    "val_loss": loss_meter.avg,
+                    "note": "sklearn metrics omitted (--no_sklearn_metrics or empty val).",
+                },
+                "per_class_report": None,
+                "efficiency": {
+                    "gflops_hook_estimate": gflops,
+                    "macs_thop_giga": macs_g,
+                    "gflops_thop_2x_macs": flops_thop_g,
+                    "throughput_images_per_sec": tput,
+                    "latency_batch_ms_mean": lat_m,
+                    "latency_batch_ms_std": lat_s,
+                    "latency_per_image_ms_mean": lat_1_m,
+                    "latency_per_image_ms_std": lat_1_s,
+                    "peak_cuda_memory_mb": peak_mb,
+                },
+                "protocol": {
+                    "image_size": cfg.IMAGE_SIZE,
+                    "benchmark_batch_size": args.batch_size,
+                    "eval_time_s": eval_time_s,
+                },
+            }
+            from utils.paper_metrics import count_parameters
+
+            tot, trn = count_parameters(model)
+            report["efficiency"]["params_total"] = tot
+            report["efficiency"]["params_trainable"] = trn
+            report["efficiency"]["params_millions"] = round(tot / 1e6, 3)
+        else:
+            report = build_full_eval_report(
+                top1=acc1_meter.avg,
+                top5=acc5_meter.avg,
+                val_loss=loss_meter.avg,
+                y_true=all_labels,
+                y_pred=all_preds,
+                class_names=class_names,
+                model=model,
+                image_size=cfg.IMAGE_SIZE,
+                batch_size_benchmark=args.batch_size,
+                gflops_hook=gflops,
+                macs_thop_g=macs_g,
+                flops_thop_g=flops_thop_g,
+                throughput_img_s=tput,
+                latency_batch_ms_mean=lat_m,
+                latency_batch_ms_std=lat_s,
+                latency_per_image_ms_mean=lat_1_m,
+                latency_per_image_ms_std=lat_1_s,
+                peak_mem_mb=peak_mb,
+                eval_time_s=eval_time_s,
+            )
+
+        with open(args.save_metrics, "w", encoding="utf-8") as f:
+            json.dump(_to_jsonable(report), f, indent=2)
+        print(f"\nFull metrics JSON → {args.save_metrics}\n")
+    elif args.no_save_json:
+        print("\n(JSON metrics file skipped: --no_save_json)\n")
 
 
 if __name__ == "__main__":

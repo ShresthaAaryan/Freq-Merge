@@ -97,8 +97,8 @@ def get_skin_loaders(
     if not os.path.isdir(train_dir):
         raise FileNotFoundError(
             f"Training images not found at '{train_dir}'. "
-            "Create class subfolders and place images inside, or set "
-            "`HAM10000_DIR` / `ISIC2019_DIR` in config.py."
+            "Expected layout: <root>/train/<class_name>/*.jpg (and val/ or test/). "
+            "Use --data_root /path/to/dataset, or set HAM10000_DIR / ISIC2019_DIR in config.py."
         )
     if not os.path.isdir(val_dir):
         raise FileNotFoundError(
