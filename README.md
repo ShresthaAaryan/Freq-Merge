@@ -8,14 +8,14 @@
 
 ![LFGM Heatmap Demo](assets/lfgm_heatmap_demo.png)
 
-> **Top row** — original CIFAR-100 images (Deer, Bicycle, Airplane, Dolphin).  
+> **Top row** — example natural images (illustration).  
 > **Middle row** — raw LFGM φ̃ score map: 🔴 red = high-frequency (edges, spokes, antlers → **protected**), 🔵 blue = low-frequency (smooth areas → **merged**).  
 > **Bottom row** — JET colormap overlay on the original image.  
 > Note how the bicycle's wheel rims and spokes are blazing red while the uniform sky stays deep blue — exactly the guidance the bipartite matching algorithm receives.
 
 ---
 
-## Key Results on CIFAR-100
+## Example results (historical CIFAR-100 benchmark)
 
 | Method               | Params (M) | GFLOPs ↓ | Throughput (img/s) ↑ | Top-1 (%) ↑ |
 |----------------------|:----------:|:--------:|:--------------------:|:-----------:|
@@ -46,7 +46,7 @@ freqmerge/
 │   ├── freq_merge.py       # FreqMerge DTM block + bipartite soft matching
 │   └── vit_freqmerge.py    # ViT-Small backbone with FreqMerge injected
 ├── data/
-│   └── cifar100.py         # CIFAR-100 DataLoaders (32×32 → 224×224 upscale)
+│   └── skin_datasets.py    # HAM10000 & ISIC 2019 ImageFolder loaders
 └── utils/
     ├── metrics.py           # AverageMeter, accuracy(), compute_throughput()
     └── visualize.py         # LFGM heatmaps, training curves, confusion matrix
@@ -63,6 +63,22 @@ pip install -r requirements.txt
 ```
 
 Requirements: Python ≥ 3.10, PyTorch ≥ 2.0.0 (CUDA recommended).
+
+### Dataset layout (HAM10000 and ISIC 2019)
+
+Download and arrange images locally (this repo does not redistribute medical data). Use one folder per dataset:
+
+```
+data/ham10000/train/<class_name>/*.jpg
+data/ham10000/val/<class_name>/*.jpg
+
+data/isic2019/train/<class_name>/*.jpg
+data/isic2019/val/<class_name>/*.jpg
+```
+
+If you only have a `test` split instead of `val`, name it `test` — the loader accepts that. Class folders must match between train and validation.
+
+Default training dataset is **HAM10000** (`config.DEFAULT_SKIN_DATASET`). Switch with `--dataset isic2019`.
 
 ---
 
@@ -101,10 +117,16 @@ python train.py --no_multi_gpu
 
 ## Training
 
-### Train FreqMerge on CIFAR-100 (default config)
+### Train FreqMerge (default: HAM10000)
 
 ```bash
 python train.py
+```
+
+### Train on ISIC 2019
+
+```bash
+python train.py --dataset isic2019
 ```
 
 ### Train with custom hyperparameters
@@ -141,6 +163,7 @@ Training outputs:
 
 ```bash
 python evaluate.py --ckpt checkpoints/best_model.pth
+python evaluate.py --ckpt checkpoints/best_model.pth --dataset isic2019
 ```
 
 ### Run a throughput benchmark (images/sec on GPU)
@@ -250,7 +273,7 @@ All hyperparameters live in `config.py` — no magic numbers in training scripts
 | Parameter      | Default                 | Description                                            |
 |----------------|-------------------------|--------------------------------------------------------|
 | `BACKBONE`     | `vit_small_patch16_224` | timm model identifier                                  |
-| `IMAGE_SIZE`   | `224`                   | Upscaled resolution (CIFAR-100 native: 32×32)          |
+| `IMAGE_SIZE`   | `224`                   | Input resolution (dermoscopy images resized to 224×224) |
 | `MERGE_LAYERS` | `[4, 6, 8, 10]`         | Encoder block indices where DTM is applied (0-indexed) |
 | `KEEP_RATE`    | `0.7`                   | Fraction of spatial tokens kept per merge layer        |
 | `ALPHA`        | `0.7`                   | Frequency penalty weight α                            |

@@ -100,7 +100,7 @@ def build_freqmerge_vit(
 
     Parameters
     ----------
-    num_classes  : Output classes (100 for CIFAR-100).
+    num_classes  : Output classes (from your dataset, e.g. 7 for HAM10000).
     merge_layers : List of 0-indexed encoder block indices where DTM is
                    applied.  Defaults to [4, 6, 8, 10].
     keep_rate    : Fraction of spatial tokens kept per merge (0 < r ≤ 1).
@@ -157,7 +157,7 @@ def build_freqmerge_vit(
 
     model.blocks = nn.Sequential(*new_blocks)
 
-    # ---- Adjust the classification head for CIFAR-100 ----------------
+    # ---- Ensure classification head matches num_classes ----------------
     # timm already sets num_classes in create_model, but double-check:
     if model.head.out_features != num_classes:
         model.head = nn.Linear(embed_dim, num_classes)

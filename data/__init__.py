@@ -1,1 +1,1 @@
-from .cifar100 import get_cifar100_loaders
+from .skin_datasets import get_skin_loaders

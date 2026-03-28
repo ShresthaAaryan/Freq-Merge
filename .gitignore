@@ -26,11 +26,13 @@ visualizations/
 *.pth
 *.pt
 
-# Dataset downloads (ignore heavy datasets)
-# Note: allow tracking small project data modules; remove 'data/' ignore if you need to commit code under data/
-# Ignore the CIFAR-100 raw download directory (keep data/ code tracked)
-data/cifar100/
-data/cifar100/cifar-100-python/
+# Dataset downloads (ignore heavy image folders; keep data/*.py tracked)
+data/ham10000/train/
+data/ham10000/val/
+data/ham10000/test/
+data/isic2019/train/
+data/isic2019/val/
+data/isic2019/test/
 
 # Jupyter / IPython
 .ipynb_checkpoints/

@@ -8,22 +8,25 @@ import os
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-DATA_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "cifar100")
+_DATA_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+HAM10000_DIR = os.path.join(_DATA_ROOT, "ham10000")
+ISIC2019_DIR = os.path.join(_DATA_ROOT, "isic2019")
+# Default dataset for CLI when --dataset is omitted
+DEFAULT_SKIN_DATASET = "ham10000"
 CKPT_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "checkpoints")
 LOG_DIR   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 VIZ_DIR   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "visualizations")
 
 # ---------------------------------------------------------------------------
-# Dataset
+# Dataset  (HAM10000 / ISIC 2019 — class count from ImageFolder at load time)
 # ---------------------------------------------------------------------------
-DATASET        = "CIFAR-100"
-NUM_CLASSES    = 100
+DATASET        = "skin_lesion"  # use --dataset ham10000 | isic2019
 IMAGE_SIZE     = 224
-NATIVE_SIZE    = 32
 PATCH_SIZE     = 16
 
-NORM_MEAN = [0.5071, 0.4867, 0.4408]
-NORM_STD  = [0.2675, 0.2565, 0.2761]
+# ImageNet normalization (ViT/ImageNet-pretrained backbones)
+NORM_MEAN = [0.485, 0.456, 0.406]
+NORM_STD  = [0.229, 0.224, 0.225]
 
 # ---------------------------------------------------------------------------
 # Model

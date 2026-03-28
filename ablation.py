@@ -25,7 +25,7 @@ import torch.nn as nn
 from tqdm import tqdm
 
 import config as cfg
-from data.cifar100 import get_cifar100_loaders
+from data.skin_datasets import get_skin_loaders
 from models.vit_freqmerge import build_freqmerge_vit
 from models.freq_merge import FreqMergeBlock, bipartite_soft_matching
 from utils.metrics import AverageMeter, accuracy, compute_throughput
@@ -38,11 +38,17 @@ import torch.nn.functional as F
 # Helpers
 # ---------------------------------------------------------------------------
 
-def load_model(alpha=0.7, merge_layers=None, pretrained=False, ckpt_path=None):
+def load_model(
+    num_classes: int,
+    alpha=0.7,
+    merge_layers=None,
+    pretrained=False,
+    ckpt_path=None,
+):
     if merge_layers is None:
         merge_layers = cfg.MERGE_LAYERS
     model = build_freqmerge_vit(
-        num_classes  = cfg.NUM_CLASSES,
+        num_classes  = num_classes,
         merge_layers = merge_layers,
         keep_rate    = cfg.KEEP_RATE,
         alpha        = alpha,
@@ -73,7 +79,7 @@ def eval_model(model, val_loader, device):
 # Ablation 1: Alpha sweep
 # ---------------------------------------------------------------------------
 
-def ablation_alpha(val_loader, ckpt_path, device):
+def ablation_alpha(val_loader, ckpt_path, device, num_classes: int):
     """Vary α and measure accuracy and throughput."""
     alphas  = [0.0, 0.25, 0.5, 0.75, 1.0]
     results = []
@@ -84,7 +90,9 @@ def ablation_alpha(val_loader, ckpt_path, device):
 
     for alpha in alphas:
         # Update alpha in all FreqMergeBlocks
-        model = load_model(alpha=alpha, ckpt_path=ckpt_path)
+        model = load_model(
+            num_classes, alpha=alpha, ckpt_path=ckpt_path,
+        )
         acc1 = eval_model(model, val_loader, device)
         tput = compute_throughput(
             model,
@@ -183,7 +191,7 @@ class AttentionScoringBlock(FreqMergeBlock):
         return torch.cat([cls_token, spatial_reduced], dim=1)
 
 
-def ablation_scoring(val_loader, ckpt_path, device):
+def ablation_scoring(val_loader, ckpt_path, device, num_classes: int):
     """Compare LFGM, random, and attention-based scoring at the same r."""
     strategies = ["LFGM (Ours)", "Random Pruning", "Attention-Based"]
     results    = []
@@ -193,7 +201,9 @@ def ablation_scoring(val_loader, ckpt_path, device):
     print("  " + "─" * 58)
 
     for strategy in strategies:
-        model = load_model(alpha=cfg.ALPHA, ckpt_path=ckpt_path)
+        model = load_model(
+            num_classes, alpha=cfg.ALPHA, ckpt_path=ckpt_path,
+        )
 
         if strategy == "Random Pruning":
             # Replace all FreqMergeBlocks with RandomScoringBlocks
@@ -244,6 +254,13 @@ def parse_args():
                         help="Which ablation to run.")
     parser.add_argument("--ckpt",  type=str, default=None,
                         help="Path to trained checkpoint.")
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default=cfg.DEFAULT_SKIN_DATASET,
+        choices=["ham10000", "isic2019"],
+        help="Must match the dataset the checkpoint was trained on.",
+    )
     return parser.parse_args()
 
 
@@ -258,16 +275,19 @@ def main():
     print(f"  Study   : {args.study}")
     print(f"{'='*60}")
 
-    _, val_loader = get_cifar100_loaders(batch_size=cfg.BATCH_SIZE)
+    _, val_loader, num_classes, _ = get_skin_loaders(
+        dataset=args.dataset,
+        batch_size=cfg.BATCH_SIZE,
+    )
 
     all_results = {}
 
     if args.study in ("alpha", "all"):
-        r = ablation_alpha(val_loader, args.ckpt, device)
+        r = ablation_alpha(val_loader, args.ckpt, device, num_classes)
         all_results["alpha_ablation"] = r
 
     if args.study in ("scoring", "all"):
-        r = ablation_scoring(val_loader, args.ckpt, device)
+        r = ablation_scoring(val_loader, args.ckpt, device, num_classes)
         all_results["scoring_ablation"] = r
 
     # Save results

@@ -1,7 +1,7 @@
 """
 train.py
 --------
-Main training script for FreqMerge on CIFAR-100.
+Main training script for FreqMerge on HAM10000 or ISIC 2019.
 
 CUDA features
 -------------
@@ -39,7 +39,7 @@ from torch.amp import GradScaler, autocast
 from tqdm import tqdm
 
 import config as cfg
-from data.cifar100 import get_cifar100_loaders
+from data.skin_datasets import get_skin_loaders
 from models.vit_freqmerge import build_freqmerge_vit
 from utils.metrics import AverageMeter, accuracy
 from utils.visualize import plot_training_curves
@@ -86,6 +86,13 @@ def parse_args():
                    help="Disable Automatic Mixed Precision (AMP / float16).")
     p.add_argument("--no_multi_gpu",  action="store_true",
                    help="Disable DataParallel even if multiple GPUs exist.")
+    p.add_argument(
+        "--dataset",
+        type=str,
+        default=cfg.DEFAULT_SKIN_DATASET,
+        choices=["ham10000", "isic2019"],
+        help="Skin lesion dataset root under data/ham10000 or data/isic2019.",
+    )
     return p.parse_args()
 
 
@@ -224,7 +231,8 @@ def main():
 
     # ── Banner ──────────────────────────────────────────────────────────
     print(f"\n{'='*62}")
-    print(f"  FreqMerge Training — CIFAR-100")
+    ds_label = "HAM10000" if args.dataset == "ham10000" else "ISIC 2019"
+    print(f"  FreqMerge Training — {ds_label}")
     print(f"  Device       : {device}  "
           f"({'AMP float16 enabled' if use_amp else 'full float32'})")
     print(f"  FreqMerge    : {'DISABLED (baseline)' if args.no_freqmerge else 'ENABLED'}")
@@ -235,12 +243,15 @@ def main():
     print(f"{'='*62}\n")
 
     # ── Data ────────────────────────────────────────────────────────────
-    train_loader, val_loader = get_cifar100_loaders(batch_size=args.batch_size)
+    train_loader, val_loader, num_classes, _ = get_skin_loaders(
+        dataset=args.dataset,
+        batch_size=args.batch_size,
+    )
 
     # ── Model ───────────────────────────────────────────────────────────
     merge_layers = [] if args.no_freqmerge else args.merge_layers
     model = build_freqmerge_vit(
-        num_classes  = cfg.NUM_CLASSES,
+        num_classes  = num_classes,
         merge_layers = merge_layers,
         keep_rate    = args.keep_rate,
         alpha        = args.alpha,
@@ -289,7 +300,7 @@ def main():
     best_val = 0.0
     best_ckpt = os.path.join(args.ckpt_dir, "best_model.pth")
 
-    print(f"Loading CIFAR-100 and resizing to {cfg.IMAGE_SIZE}×{cfg.IMAGE_SIZE}...")
+    print(f"Loading images at {cfg.IMAGE_SIZE}×{cfg.IMAGE_SIZE} ({num_classes} classes)...")
     if not args.no_freqmerge:
         print(f"Starting training with FreqMerge "
               f"(keep_rate={args.keep_rate}, alpha={args.alpha})...")

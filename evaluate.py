@@ -30,7 +30,7 @@ from tqdm import tqdm
 from torch.amp import autocast
 
 import config as cfg
-from data.cifar100 import get_cifar100_loaders
+from data.skin_datasets import get_skin_loaders
 from models.vit_freqmerge import build_freqmerge_vit
 from utils.metrics import AverageMeter, accuracy, compute_throughput
 from utils.visualize import (
@@ -117,6 +117,13 @@ def parse_args():
                         help="Evaluate plain ViT-Small baseline.")
     parser.add_argument("--no_amp", action="store_true",
                         help="Disable AMP (run in full float32).")
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default=cfg.DEFAULT_SKIN_DATASET,
+        choices=["ham10000", "isic2019"],
+        help="Must match the dataset the checkpoint was trained on.",
+    )
     return parser.parse_args()
 
 
@@ -137,12 +144,15 @@ def main():
     print(f"{'='*60}\n")
 
     # ---- Data ----------------------------------------------------------
-    _, val_loader = get_cifar100_loaders(batch_size=args.batch_size)
+    _, val_loader, num_classes, _ = get_skin_loaders(
+        dataset=args.dataset,
+        batch_size=args.batch_size,
+    )
 
     # ---- Model ---------------------------------------------------------
     merge_layers = [] if args.no_freqmerge else cfg.MERGE_LAYERS
     model = build_freqmerge_vit(
-        num_classes  = cfg.NUM_CLASSES,
+        num_classes  = num_classes,
         merge_layers = merge_layers,
         keep_rate    = cfg.KEEP_RATE,
         alpha        = cfg.ALPHA,
